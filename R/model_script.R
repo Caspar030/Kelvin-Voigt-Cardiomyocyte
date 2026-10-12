@@ -56,7 +56,7 @@ parameters <- list(
   pace_start = 0,
   
   # Peak force per sarcomere.
-  Tmax = 1,
+  Tmax = 0.1,
   
   # Relative strength of one selected sarcomere.
   weak_fraction = 0.2

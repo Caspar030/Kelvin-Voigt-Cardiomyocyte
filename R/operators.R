@@ -1,6 +1,23 @@
 # R/operators.R
 # Requires expression_tree.R
 
+
+#    ########
+#   ##      ##
+#           ##
+#          ##
+#        ##
+#      ##
+#    ##
+#   ##
+#   ##########
+#   ##########
+
+
+# Diese Datei baut mithilfe der Expressions_tree den Ausdrucksbaum auf. Hier werden die Operationen symbolisch definiert.
+# So etwa Addition, Skalarmultiplikation, das Tensorprodukt oder eben die Divergenz.
+# Die Funktion arbeitet mit den "math_expression" objects aus expression_tree.R
+
 check_expr <- function(x) {
   if (!inherits(x, "math_expr")) {
     stop("Expected a math_expr object.")

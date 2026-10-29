@@ -1,34 +1,80 @@
 # R/test_simulation.R
 #
+# Run from the project root:
+# source("R/test_simulation.R")
+#
 # Requires our latest model files and dMod2.
+# GIF export additionally requires FFmpeg.
 #
 # Geometry:
-#   8 horizontal x 5 vertical nodes
+#   40 horizontal x 15 vertical nodes
 #   left edge fixed, all other edges free
+#   2340 dynamic states
 #
 # Activation:
 #   smooth rise -> plateau -> smooth fall -> relaxation
 #
+# Damping:
+#   Kelvin-Voigt damping multiplied by damping_factor.
+#   Default: 3 (starting value to reduce ringing).
+#
 # Output:
 #   output/contraction_dynamics.pdf
 #   output/contraction_grid.pdf
+#   output/relaxation_diagnostics.pdf
+#   output/grid_contraction_highres.gif
+#
+# GIF:
+#   last 3 simulated seconds
+#   200 frames per simulated second
+#   four-times slower playback -> 50 playback FPS
 #
 # Live visualization:
 #   animate_grid()
 
-
 source("R/equation_generator.R")
 library(dMod2)
-
 
 # ------------------------------------------------------------
 # 1. Settings
 # ------------------------------------------------------------
 
-bounds <- list(min = c(1, 1), max = c(8, 5))
+# Number of nodes, not tiles.
+Nx <- 40L
+Ny <- 15L
+
+# Damping multiplier:
+#   1 = original damping
+#   3 = three-times stronger Kelvin-Voigt damping
+#
+# Stronger damping may reduce ringing, but excessive damping
+# may also slow down contraction and relaxation.
+damping_factor <- 3
+
+stopifnot(
+  Nx >= 3L,
+  Ny >= 3L,
+  Nx == floor(Nx),
+  Ny == floor(Ny),
+  length(damping_factor) == 1L,
+  is.finite(damping_factor),
+  damping_factor > 0
+)
+
+bounds <- list(
+  min = c(1L, 1L),
+  max = c(Nx, Ny)
+)
+
+# Keep the original node spacing.
+# More nodes therefore increase the physical domain size.
 spacing <- c(0.5, 0.8)
 
 duration <- 4
+
+# Simulation output every 5 ms:
+# 200 output samples per simulated second.
+# Internal integration steps are controlled by the ODE solver.
 output_step <- 0.005
 
 period <- 1
@@ -44,16 +90,17 @@ target_shortening <- 0.15
 parameters <- list(
   rho = 0.0001,
   
+  # Elasticity unchanged.
   lambda_E = 0.8,
   mu_E = 0.8,
   
-  # D/E = 0.02 s for the material terms.
-  # In a nearly overdamped proportional mode, this corresponds
-  # to roughly 0.08 s to reach 98% of a step response.
-  # The full lattice response is checked below.
-  lambda_D = 0.016,
-  mu_D = 0.016,
+  # Stronger Kelvin-Voigt damping.
+  # With damping_factor = 3:
+  # lambda_D = mu_D = 0.048.
+  lambda_D = 0.016 * damping_factor,
+  mu_D = 0.016 * damping_factor,
   
+  # Local restoring force unchanged.
   kappa = 0.1,
   
   # Unit force first; amplitude is calibrated below.
@@ -74,6 +121,12 @@ parameters$P_amplitude <- make_sarcomere_force_profile(
   }
 )
 
+cat(
+  "Generating model:",
+  Nx, "x", Ny, "nodes ...\n",
+  "Kelvin-Voigt damping factor:", damping_factor, "\n"
+)
+
 kv_model <- generate_equations(
   grid_bounds = bounds,
   spacing = spacing,
@@ -81,6 +134,9 @@ kv_model <- generate_equations(
   fixed_side = "left"
 )
 
+cat(
+  "Dynamic states:", nrow(kv_model$system), "\n"
+)
 
 # ------------------------------------------------------------
 # 2. Replace the original pulse with an external activation
@@ -92,7 +148,12 @@ rhs <- setNames(
 )
 
 pulse_text <- pacing_expression()
-stopifnot(any(grepl(pulse_text, rhs, fixed = TRUE)))
+
+stopifnot(any(grepl(
+  pulse_text,
+  rhs,
+  fixed = TRUE
+)))
 
 rhs[] <- gsub(
   pulse_text,
@@ -106,7 +167,7 @@ activation <- function(t) {
   
   smoothstep <- function(z) {
     z <- pmax(0, pmin(1, z))
-    z^2 * (3 - 2*z)
+    z^2 * (3 - 2 * z)
   }
   
   ifelse(
@@ -117,7 +178,6 @@ activation <- function(t) {
   )
 }
 
-
 # ------------------------------------------------------------
 # 3. Calibrate active force using static equilibrium
 #
@@ -126,6 +186,9 @@ activation <- function(t) {
 #
 # All sarcomere forces are scaled together, preserving
 # their equal-and-opposite force balance.
+#
+# Kelvin-Voigt damping does not affect this static equilibrium
+# because all velocities are zero.
 # ------------------------------------------------------------
 
 system <- kv_model$system
@@ -154,6 +217,12 @@ env <- list2env(
   parent = baseenv()
 )
 
+# Explicitly use the undeformed, stationary reference state
+# for the static force calibration.
+for (name in c(u_names, v_names)) {
+  env[[name]] <- 0
+}
+
 env$pace_input <- 0
 
 evaluate_acceleration <- function() {
@@ -162,17 +231,39 @@ evaluate_acceleration <- function() {
   }, numeric(1))
 }
 
+cat(
+  "Calibrating active forces ...\n",
+  "Building static matrix with",
+  length(u_names), "displacement variables.\n"
+)
+
 baseline <- evaluate_acceleration()
-K <- matrix(0, length(v_names), length(u_names))
+
+K <- matrix(
+  0,
+  nrow = length(v_names),
+  ncol = length(u_names)
+)
 
 for (j in seq_along(u_names)) {
   env[[u_names[j]]] <- 1
+  
   K[, j] <- evaluate_acceleration() - baseline
+  
   env[[u_names[j]]] <- 0
+  
+  if (j %% 100L == 0L || j == length(u_names)) {
+    cat(
+      "Static matrix columns:",
+      j, "/", length(u_names), "\n"
+    )
+  }
 }
 
 env$pace_input <- 1
 b <- evaluate_acceleration() - baseline
+
+cat("Solving static equilibrium ...\n")
 
 u_static_unit <- setNames(
   as.numeric(solve(K, -b)),
@@ -191,17 +282,23 @@ static_component <- function(values, component, i, j) {
 
 unit_shortening <- numeric(0)
 
-for (j in 1:5) {
-  for (i in 1:7) {
-    du <- static_component(u_static_unit, 1, i + 1, j) -
+for (j in seq_len(Ny)) {
+  for (i in seq_len(Nx - 1L)) {
+    du <- static_component(u_static_unit, 1, i + 1L, j) -
       static_component(u_static_unit, 1, i, j)
     
-    unit_shortening <- c(unit_shortening, -du / spacing[1])
+    unit_shortening <- c(
+      unit_shortening,
+      -du / spacing[1]
+    )
   }
 }
 
-if (max(unit_shortening) <= 0) {
-  stop("The static solution does not show longitudinal shortening.")
+if (any(!is.finite(unit_shortening)) ||
+    max(unit_shortening) <= 0) {
+  stop(
+    "The static solution does not show valid longitudinal shortening."
+  )
 }
 
 force_scale <- target_shortening / max(unit_shortening)
@@ -225,7 +322,6 @@ cat(
   100 * target_shortening, "%\n"
 )
 
-
 # ------------------------------------------------------------
 # 4. Initial asymmetry
 # ------------------------------------------------------------
@@ -233,17 +329,22 @@ cat(
 set.seed(42)
 
 kv_model$initial_values[u_names] <- runif(
-  length(u_names), -0.003, 0.003
+  length(u_names),
+  -0.003,
+  0.003
 )
 
-# Initial velocities remain zero.
-
+kv_model$initial_values[v_names] <- 0
 
 # ------------------------------------------------------------
 # 5. Forcing table and dMod2 simulation
 # ------------------------------------------------------------
 
-times <- seq(0, duration, by = output_step)
+times <- seq(
+  0,
+  duration,
+  by = output_step
+)
 
 cycle_starts <- pulse_start +
   seq(-1, ceiling(duration / period)) * period
@@ -255,7 +356,9 @@ edges <- c(
   cycle_starts + active_duration
 )
 
-edges <- edges[edges >= 0 & edges <= duration]
+edges <- edges[
+  edges >= 0 & edges <= duration
+]
 
 forcing_times <- sort(unique(c(
   seq(0, duration, by = 0.0005),
@@ -269,15 +372,29 @@ forcing_data <- data.frame(
   value = activation(forcing_times)
 )
 
-outdir <- file.path(tempdir(), "kv_fast_plateau")
-dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+# Separate compiled model name for each grid size.
+model_name <- paste0(
+  "kv_fast_plateau_",
+  Nx, "_", Ny
+)
+
+outdir <- file.path(
+  tempdir(),
+  model_name
+)
+
+dir.create(
+  outdir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
 ode_model <- dMod2::odemodel(
   f = rhs,
   forcings = "pace_input",
   deriv = FALSE,
   backend = "cppDE",
-  modelname = "kv_fast_plateau",
+  modelname = model_name,
   compile = FALSE,
   outdir = outdir
 )
@@ -292,6 +409,7 @@ x <- dMod2::Xs(
   )
 )
 
+cat("Compiling dMod2 model ...\n")
 dMod2::compile(x)
 
 available <- c(
@@ -300,11 +418,19 @@ available <- c(
 )
 
 needed <- dMod2::getParameters(x)
-missing <- setdiff(needed, names(available))
+missing <- setdiff(
+  needed,
+  names(available)
+)
 
 if (length(missing)) {
-  stop("Missing parameters: ", paste(missing, collapse = ", "))
+  stop(
+    "Missing parameters: ",
+    paste(missing, collapse = ", ")
+  )
 }
+
+cat("Running simulation ...\n")
 
 prediction <- x(
   times,
@@ -318,44 +444,105 @@ df <- prediction_df[
   prediction_df$condition == "pacing",
 ]
 
-stopifnot(all(is.finite(df$value)))
+stopifnot(
+  nrow(df) > 0L,
+  all(is.finite(df$value))
+)
 
+# Index rows by state once to avoid repeated full-table scans.
+state_rows <- split(
+  seq_len(nrow(df)),
+  as.character(df$name)
+)
 
-# ------------------------------------------------------------
-# 6. Reconstruct node positions
-# ------------------------------------------------------------
-
-nodes <- expand.grid(i = 1:8, j = 1:5)
-nodes$X <- (nodes$i - 1) * spacing[1]
-nodes$Y <- (nodes$j - 1) * spacing[2]
-
-displacement <- function(component, i, j) {
-  name <- paste("u", component, i, j, sep = "_")
+state_series <- function(name) {
+  ids <- state_rows[[name]]
   
-  if (name %in% names(kv_model$fixed_values)) {
-    return(rep(0, length(times)))
+  if (is.null(ids)) {
+    stop("State not found in simulation output: ", name)
   }
   
-  rows <- df[df$name == name, ]
+  rows <- df[ids, , drop = FALSE]
+  
   stopifnot(!anyDuplicated(rows$time))
   
-  values <- rows$value[match(times, rows$time)]
+  values <- rows$value[
+    match(times, rows$time)
+  ]
+  
   stopifnot(all(is.finite(values)))
   
   values
 }
 
+# ------------------------------------------------------------
+# 6. Reconstruct node positions
+# ------------------------------------------------------------
+
+nodes <- expand.grid(
+  i = seq_len(Nx),
+  j = seq_len(Ny)
+)
+
+nodes$X <- (nodes$i - 1) * spacing[1]
+nodes$Y <- (nodes$j - 1) * spacing[2]
+
+displacement <- function(component, i, j) {
+  name <- paste(
+    "u",
+    component,
+    i,
+    j,
+    sep = "_"
+  )
+  
+  if (name %in% names(kv_model$fixed_values)) {
+    return(rep(0, length(times)))
+  }
+  
+  state_series(name)
+}
+
+cat("Reconstructing node positions ...\n")
+
 ux <- vapply(seq_len(nrow(nodes)), function(k) {
-  displacement(1, nodes$i[k], nodes$j[k])
+  displacement(
+    1,
+    nodes$i[k],
+    nodes$j[k]
+  )
 }, numeric(length(times)))
 
 uy <- vapply(seq_len(nrow(nodes)), function(k) {
-  displacement(2, nodes$i[k], nodes$j[k])
+  displacement(
+    2,
+    nodes$i[k],
+    nodes$j[k]
+  )
 }, numeric(length(times)))
 
-xx <- sweep(ux, 2, nodes$X, "+")
-yy <- sweep(uy, 2, nodes$Y, "+")
+xx <- sweep(
+  ux,
+  2,
+  nodes$X,
+  "+"
+)
 
+yy <- sweep(
+  uy,
+  2,
+  nodes$Y,
+  "+"
+)
+
+# Precompute node groups for diagnostics and rendering.
+horizontal_ids <- lapply(seq_len(Ny), function(j) {
+  which(nodes$j == j)
+})
+
+vertical_ids <- lapply(seq_len(Nx), function(i) {
+  which(nodes$i == i)
+})
 
 # ------------------------------------------------------------
 # 7. Length diagnostics
@@ -365,12 +552,12 @@ yy <- sweep(uy, 2, nodes$Y, "+")
 strains <- list()
 reversed_order <- FALSE
 
-for (j in 1:5) {
-  ids <- which(nodes$j == j)
+for (j in seq_len(Ny)) {
+  ids <- horizontal_ids[[j]]
   
-  for (i in 1:7) {
+  for (i in seq_len(Nx - 1L)) {
     a <- ids[i]
-    b <- ids[i + 1]
+    b <- ids[i + 1L]
     
     dx <- xx[, b] - xx[, a]
     dy <- yy[, b] - yy[, a]
@@ -388,9 +575,10 @@ cat(
 )
 
 if (reversed_order) {
-  warning("Longitudinal node order reverses: inspect the geometry.")
+  warning(
+    "Longitudinal node order reverses: inspect the geometry."
+  )
 }
-
 
 # ------------------------------------------------------------
 # 8. Quantify transition times at the right boundary
@@ -399,33 +587,58 @@ if (reversed_order) {
 # This measures one observable, not every internal mode.
 # ------------------------------------------------------------
 
-right_ids <- which(nodes$i == 8)
-shortening <- -rowMeans(ux[, right_ids, drop = FALSE])
+right_ids <- which(nodes$i == Nx)
 
-static_right_shortening <- -mean(vapply(1:5, function(j) {
-  static_component(u_static, 1, 8, j)
-}, numeric(1)))
+shortening <- -rowMeans(
+  ux[, right_ids, drop = FALSE]
+)
 
-if (static_right_shortening <= 0) {
-  stop("Expected a positive static shortening of the right boundary.")
+static_right_shortening <- -mean(
+  vapply(seq_len(Ny), function(j) {
+    static_component(
+      u_static,
+      1,
+      Nx,
+      j
+    )
+  }, numeric(1))
+)
+
+if (!is.finite(static_right_shortening) ||
+    static_right_shortening <= 0) {
+  stop(
+    "Expected a positive static shortening of the right boundary."
+  )
 }
 
 # Analyze a later cycle to reduce initial-transient influence.
 cycle_start <- pulse_start + 2 * period
 
 settling_time <- function(start, end, target) {
-  ids <- which(times >= start & times <= end)
+  ids <- which(
+    times >= start & times <= end
+  )
   
-  if (!length(ids)) return(NA_real_)
+  if (!length(ids)) {
+    return(NA_real_)
+  }
   
   tolerance <- 0.02 * abs(static_right_shortening)
-  inside <- abs(shortening[ids] - target) <= tolerance
+  
+  inside <- abs(
+    shortening[ids] - target
+  ) <= tolerance
   
   # TRUE only if all subsequent samples remain inside the band.
-  remains_inside <- rev(cumprod(as.integer(rev(inside)))) == 1
+  remains_inside <- rev(
+    cumprod(as.integer(rev(inside)))
+  ) == 1
+  
   first <- which(remains_inside)[1]
   
-  if (is.na(first)) return(NA_real_)
+  if (is.na(first)) {
+    return(NA_real_)
+  }
   
   times[ids[first]] - start
 }
@@ -436,7 +649,8 @@ contraction_time <- settling_time(
   target = static_right_shortening
 )
 
-relaxation_start <- cycle_start + active_duration - ramp_duration
+relaxation_start <- cycle_start +
+  active_duration - ramp_duration
 
 relaxation_time <- settling_time(
   start = relaxation_start,
@@ -445,86 +659,185 @@ relaxation_time <- settling_time(
 )
 
 cat(
-  "Contraction settling time [s]:", contraction_time, "\n",
-  "Relaxation settling time [s]:", relaxation_time, "\n",
+  "Contraction settling time [s]:",
+  contraction_time, "\n",
+  "Relaxation settling time [s]:",
+  relaxation_time, "\n",
   "NA means the 2% band was not reached and maintained.\n"
 )
 
+# ------------------------------------------------------------
+# 8b. Relaxation diagnostics across all moving nodes
+#
+# A near-zero average boundary displacement does not necessarily
+# mean that every node has stopped moving.
+#
+# These diagnostics additionally track:
+#   - largest nodal displacement magnitude
+#   - largest absolute velocity component
+#
+# Units follow the model's length and time units.
+# ------------------------------------------------------------
+
+cat("Evaluating relaxation across all moving nodes ...\n")
+
+# Compute the maximum incrementally to avoid storing an
+# additional matrix of every velocity time series.
+max_abs_velocity <- numeric(length(times))
+
+for (name in v_names) {
+  max_abs_velocity <- pmax(
+    max_abs_velocity,
+    abs(state_series(name))
+  )
+}
+
+max_displacement <- apply(
+  sqrt(ux^2 + uy^2),
+  1L,
+  max
+)
+
+# Final 0.1 seconds before the next activation.
+rest_window <- which(
+  times >= cycle_start + period - 0.1 &
+    times < cycle_start + period
+)
+
+if (length(rest_window)) {
+  cat(
+    "\nRestphase: letzte 0.1 s vor der nächsten Aktivierung\n",
+    "Maximale verbleibende Knotenauslenkung:",
+    max(max_displacement[rest_window]), "\n",
+    "Maximaler Betrag einer Geschwindigkeitskomponente:",
+    max(max_abs_velocity[rest_window]), "\n"
+  )
+}
 
 # ------------------------------------------------------------
 # 9. Draw actual node positions
 # ------------------------------------------------------------
 
-palette <- colorRampPalette(c("#2585B5", "#E45132"))(101)
+palette <- colorRampPalette(
+  c("#2585B5", "#E45132")
+)(101)
 
-xlim <- range(c(nodes$X, xx)) + c(-0.15, 0.15)
-ylim <- range(c(nodes$Y, yy)) + c(-0.15, 0.15)
+xlim <- range(c(nodes$X, xx)) +
+  c(-0.15, 0.15)
+
+ylim <- range(c(nodes$Y, yy)) +
+  c(-0.15, 0.15)
 
 draw_frame <- function(k) {
   level <- activation(times[k])
-  bond_colour <- palette[1 + round(100 * level)]
+  
+  bond_colour <- palette[
+    1 + round(100 * level)
+  ]
   
   plot(
     NA,
-    xlim = xlim, ylim = ylim, asp = 1,
+    xlim = xlim,
+    ylim = ylim,
+    asp = 1,
     xlab = "Longitudinale Position",
     ylab = "Transversale Position",
-    main = sprintf("Gitterkontraktion | t = %.2f s", times[k])
+    main = sprintf(
+      "Gitterkontraktion | %d x %d Knoten | t = %.3f s",
+      Nx,
+      Ny,
+      times[k]
+    )
   )
   
-  for (j in 1:5) {
-    ids <- which(nodes$j == j)
+  for (j in seq_len(Ny)) {
+    ids <- horizontal_ids[[j]]
     
     lines(
-      nodes$X[ids], nodes$Y[ids],
-      col = "grey80", lty = 3
+      nodes$X[ids],
+      nodes$Y[ids],
+      col = "grey80",
+      lty = 3
     )
     
     lines(
-      xx[k, ids], yy[k, ids],
-      col = bond_colour, lwd = 2
+      xx[k, ids],
+      yy[k, ids],
+      col = bond_colour,
+      lwd = 2
     )
   }
   
-  for (i in 1:8) {
-    ids <- which(nodes$i == i)
+  for (i in seq_len(Nx)) {
+    ids <- vertical_ids[[i]]
     
     lines(
-      nodes$X[ids], nodes$Y[ids],
-      col = "grey80", lty = 3
+      nodes$X[ids],
+      nodes$Y[ids],
+      col = "grey80",
+      lty = 3
     )
     
     lines(
-      xx[k, ids], yy[k, ids],
+      xx[k, ids],
+      yy[k, ids],
       col = "grey55"
     )
   }
   
   points(
-    xx[k, ], yy[k, ],
+    xx[k, ],
+    yy[k, ],
     pch = ifelse(nodes$i == 1, 15, 16),
     col = "#182B49",
-    cex = 0.9
+    cex = 0.7
   )
   
   legend(
     "topright",
-    legend = sprintf("Aktivierung: %.2f", level),
+    legend = sprintf(
+      "Aktivierung: %.2f",
+      level
+    ),
     pch = 21,
-    pt.bg = if (level > 0.01) "#F2C94C" else "grey85",
+    pt.bg = if (level > 0.01) {
+      "#F2C94C"
+    } else {
+      "grey85"
+    },
     col = "grey35",
     pt.cex = 1.6,
     bty = "n"
   )
 }
 
-animate_grid <- function(pause = 0.03) {
+# Live preview only.
+# Actual speed depends on graphics-device rendering time.
+# The exported GIF has the specified playback frame rate.
+animate_grid <- function(
+    pause = 0.02,
+    step = 1L
+) {
+  stopifnot(
+    length(pause) == 1L,
+    is.finite(pause),
+    pause >= 0,
+    length(step) == 1L,
+    is.finite(step),
+    step >= 1L,
+    step == floor(step)
+  )
+  
   old <- par(no.readonly = TRUE)
   on.exit(par(old))
   
   par(mfrow = c(1, 1))
   
-  for (k in seq(1, length(times), by = 6)) {
+  for (k in seq.int(
+    1L,
+    length(times),
+    by = step
+  )) {
     draw_frame(k)
     Sys.sleep(pause)
   }
@@ -532,39 +845,73 @@ animate_grid <- function(pause = 0.03) {
   invisible(NULL)
 }
 
-
 # ------------------------------------------------------------
 # 10. Save plots
 # ------------------------------------------------------------
 
-dir.create("output", showWarnings = FALSE)
+dir.create(
+  "output",
+  showWarnings = FALSE
+)
 
-pdf("output/contraction_dynamics.pdf", width = 10, height = 6)
-par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
+# ------------------------------------------------------------
+# 10a. Activation and mean boundary shortening
+# ------------------------------------------------------------
+
+pdf(
+  "output/contraction_dynamics.pdf",
+  width = 10,
+  height = 6
+)
+
+par(
+  mfrow = c(2, 1),
+  mar = c(4, 4, 2, 1)
+)
 
 plot(
-  times, activation(times),
-  type = "l", lwd = 2, col = "#E45132",
-  xlab = "Zeit [s]", ylab = "Aktivierung",
+  times,
+  activation(times),
+  type = "l",
+  lwd = 2,
+  col = "#E45132",
+  xlab = "Zeit [s]",
+  ylab = "Aktivierung",
   main = "Aktive Kraft: Anstieg, Haltephase, Abfall"
 )
 
 plot(
-  times, shortening,
-  type = "l", lwd = 2, col = "#2585B5",
-  xlab = "Zeit [s]", ylab = "Mittlere Verkürzung am rechten Rand",
-  main = "Mechanische Antwort"
+  times,
+  shortening,
+  type = "l",
+  lwd = 2,
+  col = "#2585B5",
+  xlab = "Zeit [s]",
+  ylab = "Mittlere Verkürzung am rechten Rand",
+  main = sprintf(
+    "Mechanische Antwort | Dämpfungsfaktor = %g",
+    damping_factor
+  )
 )
 
-abline(h = 0, col = "grey60", lty = 2)
+abline(
+  h = 0,
+  col = "grey60",
+  lty = 2
+)
+
 abline(
   h = static_right_shortening,
-  col = "#E45132", lty = 2
+  col = "#E45132",
+  lty = 2
 )
 
 legend(
   "topright",
-  legend = c("Simulation", "Statisches kontrahiertes Gleichgewicht"),
+  legend = c(
+    "Simulation",
+    "Statisches kontrahiertes Gleichgewicht"
+  ),
   col = c("#2585B5", "#E45132"),
   lty = c(1, 2),
   bty = "n"
@@ -572,14 +919,118 @@ legend(
 
 dev.off()
 
-pdf("output/contraction_grid.pdf", width = 12, height = 8)
-par(mfrow = c(2, 3), mar = c(4, 4, 3, 1))
+# ------------------------------------------------------------
+# 10b. Grid snapshots
+# ------------------------------------------------------------
 
-snapshot_times <- cycle_start + c(0, 0.05, 0.15, 0.30, 0.40, 0.65)
+pdf(
+  "output/contraction_grid.pdf",
+  width = 12,
+  height = 8
+)
+
+par(
+  mfrow = c(2, 3),
+  mar = c(4, 4, 3, 1)
+)
+
+snapshot_times <- cycle_start +
+  c(0, 0.05, 0.15, 0.30, 0.40, 0.65)
 
 for (t in snapshot_times) {
-  draw_frame(which.min(abs(times - t)))
+  draw_frame(
+    which.min(abs(times - t))
+  )
 }
+
+dev.off()
+
+# ------------------------------------------------------------
+# 10c. Global relaxation diagnostics
+#
+# Dashed vertical lines mark the end of activation pulses.
+# ------------------------------------------------------------
+
+pulse_ends <- cycle_starts + active_duration
+
+pulse_ends <- pulse_ends[
+  pulse_ends >= min(times) &
+    pulse_ends <= max(times)
+]
+
+pdf(
+  "output/relaxation_diagnostics.pdf",
+  width = 10,
+  height = 8
+)
+
+par(
+  mfrow = c(3, 1),
+  mar = c(4, 4, 2, 1)
+)
+
+plot(
+  times,
+  activation(times),
+  type = "l",
+  lwd = 2,
+  col = "#E45132",
+  xlab = "Zeit [s]",
+  ylab = "Aktivierung",
+  main = "Aktivierung"
+)
+
+abline(
+  v = pulse_ends,
+  col = "grey65",
+  lty = 3
+)
+
+plot(
+  times,
+  max_displacement,
+  type = "l",
+  lwd = 2,
+  col = "#2585B5",
+  xlab = "Zeit [s]",
+  ylab = "Max. Auslenkung",
+  main = "Größter Verschiebungsbetrag über alle Knoten"
+)
+
+abline(
+  h = 0,
+  col = "grey60",
+  lty = 2
+)
+
+abline(
+  v = pulse_ends,
+  col = "grey65",
+  lty = 3
+)
+
+plot(
+  times,
+  max_abs_velocity,
+  type = "l",
+  lwd = 2,
+  col = "#7A5195",
+  xlab = "Zeit [s]",
+  ylab = "Max. |Geschwindigkeitskomponente|",
+  main = "Größter Betrag einer Geschwindigkeitskomponente"
+)
+
+abline(
+  h = 0,
+  col = "grey60",
+  lty = 2
+)
+
+abline(
+  v = pulse_ends,
+  col = "grey65",
+  lty = 3
+)
 
 dev.off()
 
@@ -588,24 +1039,32 @@ cat(
   "Live animation: animate_grid()\n"
 )
 
-
-
-
-
-
-
-
-
-
-
-#creting high-res gif. #########Needs: sudo apt install ffmpeg
+# ------------------------------------------------------------
+# 11. High-resolution GIF export
+#
+# Requires FFmpeg.
+# Ubuntu/Debian:
+#   sudo apt install ffmpeg
+#
+# IMPORTANT:
+# fps means frames per SIMULATED second.
+#
+# Playback FPS = fps / slowdown
+#
+# Defaults:
+#   fps = 200
+#   slowdown = 4
+#   -> 50 playback FPS
+#
+# output_step = 0.005 provides matching simulation samples.
+# ------------------------------------------------------------
 
 create_grid_gif <- function(
     from = max(min(times), max(times) - 3),
     to = max(times),
-    fps = 30,
+    fps = 200,
     slowdown = 4,
-    width = 1000,
+    width = 1200,
     height = 800,
     filename = "output/grid_contraction_highres.gif"
 ) {
@@ -625,14 +1084,18 @@ create_grid_gif <- function(
   }
   
   if (!exists("draw_frame", mode = "function")) {
-    stop("Bitte zuerst die Simulation mit draw_frame() ausführen.")
+    stop(
+      "Bitte zuerst die Simulation mit draw_frame() ausführen."
+    )
   }
   
   if (!is.numeric(times) ||
       length(times) < 2L ||
       any(!is.finite(times)) ||
       any(diff(times) <= 0)) {
-    stop("times muss endlich und streng aufsteigend sein.")
+    stop(
+      "times muss endlich und streng aufsteigend sein."
+    )
   }
   
   settings <- list(
@@ -664,7 +1127,6 @@ create_grid_gif <- function(
   width <- as.integer(round(width))
   height <- as.integer(round(height))
   
-  
   # ----------------------------------------------------------
   # 2. Prepare output and temporary files
   # ----------------------------------------------------------
@@ -688,14 +1150,20 @@ create_grid_gif <- function(
     add = TRUE
   )
   
-  palette_file <- file.path(frame_dir, "palette.png")
-  log_file <- file.path(frame_dir, "ffmpeg.log")
+  palette_file <- file.path(
+    frame_dir,
+    "palette.png"
+  )
+  
+  log_file <- file.path(
+    frame_dir,
+    "ffmpeg.log"
+  )
   
   frame_pattern <- file.path(
     frame_dir,
     "frame_%05d.png"
   )
-  
   
   # ----------------------------------------------------------
   # 3. Select simulated frames
@@ -704,7 +1172,10 @@ create_grid_gif <- function(
   # slowdown changes playback speed only.
   # ----------------------------------------------------------
   
-  nframes <- max(2L, round((to - from) * fps))
+  nframes <- max(
+    2L,
+    round((to - from) * fps)
+  )
   
   target_times <- from +
     (0:(nframes - 1L)) * (to - from) / nframes
@@ -721,15 +1192,18 @@ create_grid_gif <- function(
     )
   }
   
-  playback_fps <- nframes / ((to - from) * slowdown)
+  playback_fps <- nframes /
+    ((to - from) * slowdown)
   
   cat(
     "Erzeuge", nframes, "Bilder mit",
     width, "x", height, "Pixeln.\n",
+    "Wiedergabe-FPS:",
+    round(playback_fps, 3), "\n",
     "Abspieldauer ungefähr:",
-    round((to - from) * slowdown, 2), "Sekunden.\n"
+    round((to - from) * slowdown, 2),
+    "Sekunden.\n"
   )
-  
   
   # ----------------------------------------------------------
   # 4. Save individual PNGs
@@ -744,7 +1218,10 @@ create_grid_gif <- function(
       bg = "white"
     )
     
-    on.exit(dev.off(), add = TRUE)
+    on.exit(
+      dev.off(),
+      add = TRUE
+    )
     
     par(
       mfrow = c(1, 1),
@@ -761,13 +1238,18 @@ create_grid_gif <- function(
       sprintf("frame_%05d.png", m)
     )
     
-    save_frame(indices[m], path)
+    save_frame(
+      indices[m],
+      path
+    )
     
     if (m %% 20L == 0L || m == nframes) {
-      cat("Bilder:", m, "/", nframes, "\n")
+      cat(
+        "Bilder:",
+        m, "/", nframes, "\n"
+      )
     }
   }
-  
   
   # ----------------------------------------------------------
   # 5. FFmpeg helper
@@ -785,19 +1267,29 @@ create_grid_gif <- function(
       if (file.exists(log_file)) {
         cat(
           paste(
-            tail(readLines(log_file, warn = FALSE), 30),
+            tail(
+              readLines(
+                log_file,
+                warn = FALSE
+              ),
+              30
+            ),
             collapse = "\n"
           ),
           "\n"
         )
       }
       
-      stop("FFmpeg-Export fehlgeschlagen; siehe Ausgabe oben.")
+      stop(
+        "FFmpeg-Export fehlgeschlagen; siehe Ausgabe oben."
+      )
     }
   }
   
-  rate <- sprintf("%.8f", playback_fps)
-  
+  rate <- sprintf(
+    "%.8f",
+    playback_fps
+  )
   
   # ----------------------------------------------------------
   # 6. First pass: generate a shared colour palette
@@ -815,12 +1307,12 @@ create_grid_gif <- function(
     "-framerate", rate,
     "-start_number", "1",
     "-i", shQuote(frame_pattern),
-    "-vf", shQuote("palettegen=max_colors=256:stats_mode=full"),
+    "-vf",
+    shQuote("palettegen=max_colors=256:stats_mode=full"),
     "-frames:v", "1",
     "-update", "1",
     shQuote(palette_file)
   ))
-  
   
   # ----------------------------------------------------------
   # 7. Second pass: encode GIF using the palette
@@ -845,7 +1337,9 @@ create_grid_gif <- function(
   
   if (!file.exists(gif_file) ||
       file.info(gif_file)$size <= 0) {
-    stop("Es wurde keine gültige GIF-Datei erzeugt.")
+    stop(
+      "Es wurde keine gültige GIF-Datei erzeugt."
+    )
   }
   
   size_mb <- file.info(gif_file)$size / 1024^2
@@ -854,20 +1348,25 @@ create_grid_gif <- function(
     "\nGIF gespeichert:\n",
     gif_file,
     "\nDateigröße:",
-    round(size_mb, 2), "MB\n"
+    round(size_mb, 2),
+    "MB\n"
   )
   
   invisible(gif_file)
 }
 
-
 # ------------------------------------------------------------
-# Export: last 3 simulated seconds, four-times slower playback
+# 12. Export
+#
+# Last 3 simulated seconds.
+# 200 frames per simulated second.
+# Four-times slower playback:
+#   600 frames / 12 seconds = 50 playback FPS.
 # ------------------------------------------------------------
 
 gif_file <- create_grid_gif(
-  fps = 30,
+  fps = 200,
   slowdown = 4,
-  width = 1000,
+  width = 1200,
   height = 800
 )

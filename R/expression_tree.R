@@ -1,5 +1,17 @@
 # R/expression_tree.R
 #
+#        ##
+#      ####
+#    ######
+#        ##
+#        ##
+#        ##
+#        ##
+#        ##
+#    ##########
+#    ##########
+
+#                           
 # shape:
 #   integer(0)   scalar
 #   c(2)         vector
@@ -73,6 +85,8 @@ show_type <- function(x) {
   invisible(x)
 }
 
+
+#Die Funktion ist rekursiv. Sie zeigt verschachtelte Ausdrücke an.
 print_expr <- function(x, indent = 0L) {
   stopifnot(inherits(x, "math_expr"))
   

@@ -1,5 +1,68 @@
 # R/fields.R
 #
+
+#         ###
+#        ####
+#       ## ##
+#      ##  ##
+#     ##   ##
+#    ##    ##
+#   ##########
+#          ##
+#          ##
+#          ##
+
+
+#In fields.R we define the symbolic fields of operators.R numerically.
+
+
+
+
+
+# ============================================================
+# FILE OVERVIEW — fields.R
+#
+# Numerical geometry, material properties, and active forces
+# for the Kelvin-Voigt model.
+# ============================================================
+#
+# 1. Helpers and validation
+#    Retrieve parameters, supply defaults, and validate inputs.
+#
+# 2. Reference and current geometry
+#    Calculate reference distances, displaced positions,
+#    and distances between displaced nodes.
+#
+# 3. Material tensors
+#    Construct isotropic fourth-order tensors for E and D.
+#    Validate tensor dimensions and finite numerical values.
+#
+# 4. Pacing
+#    Define the time-dependent activation pulse and its
+#    symbolic expression.
+#
+# 5. Active sarcomere forces
+#    Build equal-and-opposite tensile forces between
+#    longitudinal neighbors and convert net nodal forces
+#    into force densities using control volumes.
+#
+# 6. Numerical field definitions
+#    Provide a common interface for material properties,
+#    density, restoring coefficients, and active forces.
+#    Support constant values and spatially varying functions.
+#
+# 7. Numerical-to-symbolic field binding
+#    Evaluate spatial fields at reference-grid nodes and
+#    associate their values with named ODE coefficients.
+#    Keep the activation pulse symbolic.
+#
+# ------------------------------------------------------------
+# This file defines functions only.
+# No model generation, simulation, or plotting is run here.
+# ============================================================
+
+
+
 # Reference configuration; vector-valued displacement.
 #
 # E, D:
@@ -102,6 +165,8 @@ check_field_geometry <- function(grid_bounds, spacing, origin) {
 # 2. Reference and current geometry
 # ------------------------------------------------------------
 
+# euclidean distance between two points in reference configuration.
+
 A0 <- function(X, Y, parameters = list()) {
   check_vector(X, "X")
   check_vector(Y, "Y")
@@ -112,6 +177,7 @@ A0 <- function(X, Y, parameters = list()) {
   
   sqrt(sum((Y - X)^2))
 }
+
 
 current_position <- function(X, u) {
   check_vector(X, "X")
@@ -124,6 +190,7 @@ current_position <- function(X, u) {
   X + u
 }
 
+#current distance of nodes, AFTER their displacement from reference configuration
 a_current <- function(X, Y, uX, uY, parameters = list()) {
   x <- current_position(X, uX)
   y <- current_position(Y, uY)
@@ -139,6 +206,14 @@ a_current <- function(X, Y, uX, uY, parameters = list()) {
 # ------------------------------------------------------------
 # 3. Material tensors
 # ------------------------------------------------------------
+
+
+#Using Lame parameters lambda und mu um E zu konstruieren.
+# They restrict your material to ISOTRPOIC LINEAR ELASTICITY.
+# The array E can store more general tensors, but isotropic_tensor() generates only a particular subset of them.
+
+# So far, this is the fallback option to when no explicit E is supplied: Happens in Section 6, inside default_fields() → material_field()
+
 
 validate_material <- function(C, dimension, name) {
   expected <- rep(as.integer(dimension), 4L)
@@ -266,6 +341,9 @@ pacing_pulse <- function(t, parameters = list()) {
 #   out-of-plane thickness in consistent physical units.
 # ------------------------------------------------------------
 
+
+#
+
 make_sarcomere_force_profile <- function(
     grid_bounds,
     spacing,
@@ -381,6 +459,9 @@ make_sarcomere_force_profile <- function(
 # Default active force is zero until a profile is supplied.
 # ------------------------------------------------------------
 
+
+
+# Here, numerical field definitions can be made.
 default_fields <- function(dim) {
   dimension <- check_spatial_dimension(dim)
   
@@ -528,6 +609,10 @@ default_fields <- function(dim) {
 # A later fitting adapter must explicitly preserve/reconstruct
 # shared dependencies such as Tmax or material parameters.
 # ------------------------------------------------------------
+
+
+#builds the connection between “a coefficient name in the equation” and “the numerical value belonging to that name.”
+
 
 make_field_binding <- function(
     fields,

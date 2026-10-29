@@ -1,5 +1,24 @@
 # R/boundary_conditions.R
 #
+
+#    ########
+#   ##      ##
+#           ##
+#           ##
+#      ######
+#           ##
+#           ##
+#           ##
+#   ##      ##
+#    ########
+
+
+# For a grid point, this file determines, where it is, and what boundary condition is applied to it.
+
+
+
+
+
 # Boundary utilities for a two-dimensional grid.
 #
 # index[1] = x-direction
@@ -52,6 +71,7 @@ validate_grid_bounds <- function(grid_bounds) {
 # ------------------------------------------------------------
 # 2. Validate a grid index
 # ------------------------------------------------------------
+# Does the index lay within the grid bounds?  
 
 validate_grid_index <- function(index, grid_bounds) {
   
@@ -77,6 +97,7 @@ validate_grid_index <- function(index, grid_bounds) {
 # ------------------------------------------------------------
 # 3. Identify boundary sides
 # ------------------------------------------------------------
+# allows to classify boundary points (right, left, top, bottom)
 
 boundary_sides <- function(index, grid_bounds) {
   
@@ -94,6 +115,8 @@ boundary_sides <- function(index, grid_bounds) {
 # ------------------------------------------------------------
 # 4. Classify a node
 # ------------------------------------------------------------
+# One and exactly one side will be set as a fixed side. Default is left.
+
 
 classify_boundary <- function(
     index,
@@ -124,7 +147,7 @@ classify_boundary <- function(
 # ------------------------------------------------------------
 # 5. Boundary predicates
 # ------------------------------------------------------------
-
+# nodes can be "fixed", "free" or "interior".
 is_fixed_boundary <- function(
     index,
     grid_bounds,
@@ -151,6 +174,7 @@ is_free_boundary <- function(
 # Matches default_field_symbol() in discretization.R.
 # ------------------------------------------------------------
 
+#what states of the input are fixed? If it is a free, or interior node, there are none.
 fixed_boundary_states <- function(
     index,
     grid_bounds,
@@ -187,6 +211,8 @@ fixed_boundary_states <- function(
 # ------------------------------------------------------------
 # 7. Symbolic fixed-boundary constraints
 # ------------------------------------------------------------
+# fixed point equations are generated as strings.
+
 
 fixed_boundary_equations <- function(
     index,
@@ -215,6 +241,7 @@ fixed_boundary_equations <- function(
 # First coordinate varies fastest.
 # ------------------------------------------------------------
 
+#returns a matrix with the grid points.
 grid_points <- function(grid_bounds) {
   
   validate_grid_bounds(grid_bounds)
@@ -270,3 +297,19 @@ classify_grid <- function(
     stringsAsFactors = FALSE
   )
 }
+
+
+#returns a labeled grid/table: Example
+#    index x y boundary
+# 1      1 1 1    fixed
+# 2      2 2 1     free
+# 3      3 3 1     free
+# 4      4 4 1     free
+# 5      5 1 2    fixed
+# 6      6 2 2 interior
+# 7      7 3 2 interior
+# 8      8 4 2     free
+# 9      9 1 3    fixed
+# 10    10 2 3     free
+# 11    11 3 3     free
+# 12    12 4 3     free

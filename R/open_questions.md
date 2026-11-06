@@ -1,5 +1,27 @@
 # Offene Fragen zur Materialmodellierung
 
+
+
+ToDo's
+
+1. Festplatte nehmen zu Viv
+
+2. Für die Präsentation der Doktorarbeit eine Präsentation machen mit Animationen wie bei 3blue1brown
+
+2. Beliebige Zusammenhängende Mengen erlauben. Nicht nur noch gitter.
+3. Boundary conditions einarbeiten: Glass rods. Ein glass rod im inneren: fixierte Punkte. 
+Ein anderer Glass rod fixiert nur knoten miteinander fest, lokal.
+
+4. Welche Parameter haben den größten Einfluss darauf, dass sich die Kontraktionskraft ändert
+- veränderte Referenzkonfiguration: zueinander verschobene Sarkomere?
+- Steifigkeit?
+
+5. Bei Raffi sitzen.
+
+
+
+
+
 ## Soll sich die Steifigkeit während der Kontraktion ändern?
 
 Aktuell wird der Elastizitätstensor E(X) an den Referenzpositionen
